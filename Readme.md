@@ -1,3 +1,5 @@
+```markdown
+<!-- /Users/muhammadaliyan/Desktop/Redis/Readme.md -->
 # Go-Redis: A Distributed Database and Event Stream
 
 ## Overview
@@ -40,3 +42,85 @@ Clone the repository and build the binaries using the provided Makefile:
 git clone https://github.com/MuhammadAliyan10/Redis.git
 cd Redis
 make build
+```
+
+This will generate three executable binaries in the `bin/` directory: `redis-server`, `redis-replica`, and `redis-sentinel`.
+
+## Usage and Cluster Setup
+
+### 1. Start the Master Node
+Run the primary database instance on the default port (6379):
+
+```bash
+make run
+```
+Or manually:
+```bash
+./bin/redis-server --port 6379
+```
+
+### 2. Start a Replica Node
+Run a secondary node that syncs its data from the master:
+
+```bash
+make run-replica
+```
+Or manually:
+```bash
+./bin/redis-server --port 6380 --replicaof 127.0.0.1:6379
+```
+
+### 3. Start the Sentinel (Auto-Failover Monitor)
+Run the monitoring process to ensure high availability:
+
+```bash
+make run-sentinel
+```
+Or manually:
+```bash
+./bin/redis-sentinel
+```
+
+## Supported Commands
+
+The server parses and communicates using the REdis Serialization Protocol (RESP). The following commands are fully supported:
+
+### Key-Value Operations
+- `SET key value [EX seconds]`: Set the string value of a key, optionally with a time-to-live expiration.
+- `GET key`: Get the value of a key.
+- `DEL key`: Delete a key.
+
+### Stream Operations
+- `XADD stream_name event_data`: Append a new event message to a stream.
+- `XREAD stream_name offset_id`: Read messages from a stream starting after the specified offset ID.
+
+### Server Operations
+- `BGREWRITEAOF`: Trigger a background process to rewrite and compress the Append-Only File.
+- `PING`: Test server connectivity and latency.
+- `SYNC`: Internal command used by replicas to initiate data synchronization.
+- `PROMOTE`: Internal command used by Sentinel to elevate a replica to master status.
+
+## Development and Testing
+
+To run the test suite and ensure all components are functioning correctly:
+
+```bash
+make test
+```
+
+To format the codebase according to Go standards:
+
+```bash
+make fmt
+```
+
+## Contributing
+
+Contributions are welcome and appreciated. Please review the `CONTRIBUTING.md` file for detailed instructions on how to submit pull requests, report bugs, or request features. Ensure that all new code adheres to the existing architecture patterns and includes appropriate test coverage.
+
+Please note that this project is released with a Contributor Code of Conduct (`CODE_OF_CONDUCT.md`). By participating in this project you agree to abide by its terms.
+
+## License
+
+This project is licensed under the MIT License. See the `LICENSE` file for full details.
+```
