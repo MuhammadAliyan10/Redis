@@ -1,5 +1,3 @@
-```markdown
-<!-- /Users/muhammadaliyan/Desktop/Redis/Readme.md -->
 # Go-Redis: A Distributed Database and Event Stream
 
 ## Overview
@@ -123,4 +121,4 @@ Please note that this project is released with a Contributor Code of Conduct (`C
 ## License
 
 This project is licensed under the MIT License. See the `LICENSE` file for full details.
-```
+
