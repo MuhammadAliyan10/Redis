@@ -1,40 +1,42 @@
-# Go-Redis: A Distributed Database & Event Stream
+# Go-Redis: A Distributed Database and Event Stream
 
-A high-performance, fault-tolerant, fully concurrent Redis clone built entirely from scratch in Go.
-This project implements the core architecture of modern distributed systems, including internal sharding, asynchronous replication, log compaction, and leader election.
+## Overview
 
-## 🚀 Core Features
+Go-Redis is a high-performance, fault-tolerant, fully concurrent distributed in-memory data structure store, used as a database, cache, and message broker. Built entirely in Go, this project implements the core architecture of modern distributed systems, including internal sharding, asynchronous replication, log compaction, and leader election.
 
-*   **Multithreaded Storage Engine:** Implements FNV-1a Hashing and Map Sharding (256 shards) with fine-grained `sync.RWMutex` locks, allowing massive read/write concurrency without CPU lock contention.
-*   **Probabilistic Garbage Collection:** A background worker intelligently samples and evicts keys based on their Time-To-Live (`EX`), ensuring the memory footprint remains optimized.
-*   **AOF Persistence & Log Compaction:** Commands are persisted to disk via an Append-Only File (AOF). Includes a `BGREWRITEAOF` engine that atomically squashes redundant logs into perfect snapshots.
-*   **Master-Replica Replication:** Asynchronous TCP broadcasting allows secondary nodes to instantly mirror the Master's state.
-*   **Sentinel Leader Election:** A standalone Heartbeat Monitor that acts as a Chaos-Monkey-proof failover judge. If the Master dies, Sentinel automatically promotes a Replica and reroutes cluster traffic.
-*   **Distributed Message Queue:** Includes "Redis Streams" (`XADD`, `XREAD`)—an Append-Only Log architecture natively built into the engine for event sourcing.
+This system is designed to provide massive read and write concurrency without CPU lock contention, making it suitable for high-throughput applications requiring low latency and reliable data persistence.
 
-## 🛠️ Supported Commands
+## Architecture and Core Features
 
-*   `SET key value [EX seconds]`
-*   `GET key`
-*   `DEL key`
-*   `XADD stream_name event_data`
-*   `XREAD stream_name offset_id`
-*   `BGREWRITEAOF` (Triggers Log Compaction)
-*   `PING`
+### Multithreaded Storage Engine
+The core storage engine utilizes FNV-1a Hashing and Map Sharding across 256 independent shards. Each shard is protected by fine-grained `sync.RWMutex` locks. This architecture ensures that operations on different keys can proceed in parallel, eliminating the traditional single-threaded bottleneck found in similar memory stores.
 
-## 💻 How to Run the Distributed Cluster
+### Probabilistic Garbage Collection
+Memory management is handled by a background worker that intelligently samples and evicts keys based on their Time-To-Live (TTL). This probabilistic approach ensures the memory footprint remains optimized without incurring the latency spikes associated with global stop-the-world sweeps.
 
-**1. Start the Master Node:**
-\`\`\`bash
-go run cmd/redis-server/main.go --port 6379
-\`\`\`
+### AOF Persistence and Log Compaction
+All write commands are persisted to disk via an Append-Only File (AOF). To prevent unbounded disk growth, the system features a background AOF rewrite engine (`BGREWRITEAOF`). This mechanism atomically squashes redundant logs into a highly compressed snapshot of the current state without blocking active client requests.
 
-**2. Start a Replica Node:**
-\`\`\`bash
-go run cmd/redis-server/main.go --port 6380 --replicaof 127.0.0.1:6379
-\`\`\`
+### Master-Replica Replication
+High availability and read scaling are achieved through asynchronous TCP broadcasting. Secondary replica nodes connect to the master node and instantly mirror its state. All write operations on the master are reliably broadcasted to all connected replicas.
 
-**3. Start the Sentinel (Auto-Failover Monitor):**
-\`\`\`bash
-go run cmd/sentinel/main.go
-\`\`\`
+### Sentinel Leader Election
+The system includes a standalone Heartbeat Monitor (Sentinel) that acts as a failover judge. By continuously monitoring the health of the master node, the Sentinel can automatically promote a healthy replica and reroute cluster traffic if the master becomes unresponsive, ensuring zero-downtime tolerance for node failures.
+
+### Distributed Message Queue
+A native append-only log architecture is built directly into the engine to support event sourcing. The stream data structure allows producers to append events (`XADD`) and consumers to read them sequentially or by offset (`XREAD`), functioning as a high-throughput message queue.
+
+## Installation
+
+### Prerequisites
+- Go 1.21 or higher
+- Make (optional, but recommended for build automation)
+
+### Building from Source
+
+Clone the repository and build the binaries using the provided Makefile:
+
+```bash
+git clone https://github.com/MuhammadAliyan10/Redis.git
+cd Redis
+make build
