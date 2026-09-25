@@ -1,124 +1,143 @@
-# Go-Redis: A Distributed Database and Event Stream
+# High-Performance Distributed In-Memory Key-Value Store
 
-## Overview
+An industrial-grade, lock-free, distributed in-memory data structure store built entirely in Go. Designed to handle extreme throughput with zero garbage-collection latency spikes, this system translates OS-level C concepts (such as `epoll` and `fork()`) into highly concurrent, idiomatic Go.
 
-Go-Redis is a high-performance, fault-tolerant, fully concurrent distributed in-memory data structure store, used as a database, cache, and message broker. Built entirely in Go, this project implements the core architecture of modern distributed systems, including internal sharding, asynchronous replication, log compaction, and leader election.
+This project was built to explore the deep internals of distributed systems, shifting from a naive multi-threaded architecture with heavy mutex contention to a highly optimized, lock-free **Actor Model** execution engine.
 
-This system is designed to provide massive read and write concurrency without CPU lock contention, making it suitable for high-throughput applications requiring low latency and reliable data persistence.
+---
 
-## Architecture and Core Features
+## Table of Contents
+1. [Core Architecture](#core-architecture)
+    - [Layer 1: The Network Boundary](#layer-1-the-network-boundary)
+    - [Layer 2: The Execution Engine](#layer-2-the-execution-engine)
+    - [Layer 3: The Memory Subsystem](#layer-3-the-memory-subsystem)
+    - [Layer 4: Persistence & Durability](#layer-4-persistence--durability)
+    - [Layer 5: Distributed Topology](#layer-5-distributed-topology)
+2. [Supported Data Structures & Commands](#supported-data-structures--commands)
+3. [Getting Started](#getting-started)
+4. [Deployment & Clustering](#deployment--clustering)
+5. [Codebase Structure](#codebase-structure)
+6. [Performance Characteristics](#performance-characteristics)
 
-### Multithreaded Storage Engine
-The core storage engine utilizes FNV-1a Hashing and Map Sharding across 256 independent shards. Each shard is protected by fine-grained `sync.RWMutex` locks. This architecture ensures that operations on different keys can proceed in parallel, eliminating the traditional single-threaded bottleneck found in similar memory stores.
+---
 
-### Probabilistic Garbage Collection
-Memory management is handled by a background worker that intelligently samples and evicts keys based on their Time-To-Live (TTL). This probabilistic approach ensures the memory footprint remains optimized without incurring the latency spikes associated with global stop-the-world sweeps.
+## Core Architecture
 
-### AOF Persistence and Log Compaction
-All write commands are persisted to disk via an Append-Only File (AOF). To prevent unbounded disk growth, the system features a background AOF rewrite engine (`BGREWRITEAOF`). This mechanism atomically squashes redundant logs into a highly compressed snapshot of the current state without blocking active client requests.
+This project is built strictly across five architectural layers, separating network I/O, execution, memory management, disk persistence, and cluster replication.
 
-### Master-Replica Replication
-High availability and read scaling are achieved through asynchronous TCP broadcasting. Secondary replica nodes connect to the master node and instantly mirror its state. All write operations on the master are reliably broadcasted to all connected replicas.
+### Layer 1: The Network Boundary
+- **Concurrent TCP Acceptor**: The server handles thousands of concurrent clients by spinning up a lightweight Goroutine per TCP connection.
+- **Zero-Copy RESP Parser**: Traditional parsers use `bufio.Scanner` and constantly allocate new strings, triggering Go's Garbage Collector. This system uses raw byte arithmetic (`[][]byte`) and `bytes.Index` to extract commands directly from the network buffer without copying memory.
+- **Pipelining Support**: The parser can handle highly fragmented TCP packets or massive pipelines of commands sent in a single burst without blocking the network thread.
 
-### Sentinel Leader Election
-The system includes a standalone Heartbeat Monitor (Sentinel) that acts as a failover judge. By continuously monitoring the health of the master node, the Sentinel can automatically promote a healthy replica and reroute cluster traffic if the master becomes unresponsive, ensuring zero-downtime tolerance for node failures.
+### Layer 2: The Execution Engine
+- **The Actor Model**: Traditional databases use `sync.RWMutex` to protect data, causing severe CPU cache-line bouncing and lock contention. This architecture funnels all parsed commands from the network Goroutines into a **single, massive buffered channel**.
+- **Lock-Free State**: A dedicated single-threaded Engine Goroutine consumes commands from this channel sequentially. Because only one thread ever touches the data map, `sync.RWMutex` locks are completely eliminated. This keeps CPU L1/L2 caches blazing fast and enables millions of operations per second.
 
-### Distributed Message Queue
-A native append-only log architecture is built directly into the engine to support event sourcing. The stream data structure allows producers to append events (`XADD`) and consumers to read them sequentially or by offset (`XREAD`), functioning as a high-throughput message queue.
+### Layer 3: The Memory Subsystem
+- **Universal Object Wrapper**: All data (Strings, Hashes) is stored in a master dictionary utilizing a universal `Object` struct, preventing type confusion.
+- **LRU Maxmemory Eviction**: Memory growth is strictly monitored. An O(1) doubly-linked list (`container/list`) acts as a Least Recently Used (LRU) tracker. When the configured `maxmemory` threshold is breached, the coldest keys at the back of the list are mathematically severed, protecting the host OS from Out-Of-Memory (OOM) crashes.
+- **Passive & Active Expiration (TTL)**: 
+  - *Passive*: Expired keys are deleted lazily if a client attempts to `GET` them.
+  - *Active*: To prevent "Ghost Keys" from quietly eating RAM, a background Cron job uses Go's native randomized map iteration (a Monte Carlo probabilistic approach) to sample an isolated TTL index and sweep abandoned data continuously.
 
-## Installation
+### Layer 4: Persistence & Durability
+- **AOF Group Commit**: Writing directly to disk (`fsync`) pauses the CPU. Instead, mutations are pushed to a background I/O worker via a 100,000-command buffer. The worker flushes the Append-Only File (AOF) to the OS asynchronously (Appendfsync Everysec).
+- **Point-in-Time Snapshotting**: Go cannot safely use the Linux `fork()` syscall to clone a multi-threaded runtime. To execute `BGREWRITEAOF` (Log Compaction), the Engine pauses for a fraction of a millisecond to perform a deep-copy clone of the memory map. The background worker serializes this clone into a compressed log, atomically replacing the old AOF without interrupting live traffic.
+
+### Layer 5: Distributed Topology
+- **Asynchronous Broadcasting**: All successful mutations in the Engine are immediately pushed to a Replication Broker channel. A dedicated background Goroutine fans out the byte-streams to all connected secondary Replicas.
+- **Handshake Protocol (`SYNC`)**: When a Replica node boots and connects to the Master, it initiates a handshake. The Master instantly snapshots its state, executes a `FULLRESYNC` over the network socket, and seamlessly streams the entire database while queuing live incoming traffic for the Replica.
+
+---
+
+## Supported Data Structures & Commands
+
+The Engine natively supports the exact wire protocol expected by `redis-cli`.
+
+### Basic Operations
+- `PING`: Tests connection liveness.
+- `SET <key> <value> [EX <seconds>]`: Stores a string with an optional TTL expiration.
+- `GET <key>`: Retrieves a string.
+- `DEL <key>`: Erases a key from memory and all tracking subsystems.
+
+### Complex Structures (Hashes)
+- `HSET <key> <field> <value>`: Sets a field in a hash map.
+- `HGET <key> <field>`: Retrieves a field from a hash map.
+
+### Cluster & Maintenance
+- `BGREWRITEAOF`: Triggers a Point-in-Time Snapshot and compresses the Append-Only File in the background.
+- `SYNC`: Internal cluster command used by Replicas to request a full state transfer from the Master.
+
+---
+
+## Getting Started
 
 ### Prerequisites
-- Go 1.21 or higher
-- Make (optional, but recommended for build automation)
+- **Go**: Version 1.21 or higher.
+- **Make**: Standard build automation tool.
+- **redis-cli**: Standard Redis command-line interface for testing (optional but recommended).
 
-### Building from Source
-
-Clone the repository and build the binaries using the provided Makefile:
+### Compilation
+Clone the repository and build the distributed binaries using the included Makefile.
 
 ```bash
-git clone https://github.com/MuhammadAliyan10/Redis.git
-cd Redis
 make build
 ```
+This will compile the source code and generate the executables `redis-server`, `redis-replica`, and `redis-sentinel` inside the local `bin/` directory.
 
-This will generate three executable binaries in the `bin/` directory: `redis-server`, `redis-replica`, and `redis-sentinel`.
+---
 
-## Usage and Cluster Setup
+## Deployment & Clustering
 
-### 1. Start the Master Node
-Run the primary database instance on the default port (6379):
-
-```bash
-make run
-```
-Or manually:
+### 1. Booting the Master Node
+Start the primary server on the default port. The Master node handles both Read and Write operations and manages the primary AOF file.
 ```bash
 ./bin/redis-server --port 6379
 ```
 
-### 2. Start a Replica Node
-Run a secondary node that syncs its data from the master:
-
+### 2. Booting a Replica Node
+Start a secondary replica on a different port, pointing it to the Master node. The Replica will instantly execute a `SYNC`, download the Master's state, and prepare to serve Read-Only traffic.
 ```bash
-make run-replica
-```
-Or manually:
-```bash
-./bin/redis-server --port 6380 --replicaof 127.0.0.1:6379
+./bin/redis-replica --port 6380 --replicaof 127.0.0.1:6379
 ```
 
-### 3. Start the Sentinel (Auto-Failover Monitor)
-Run the monitoring process to ensure high availability:
+### 3. Verifying the Cluster
+Open a new terminal and use `redis-cli` to test the replication:
 
 ```bash
-make run-sentinel
-```
-Or manually:
-```bash
-./bin/redis-sentinel
-```
+# Write data to the Master Node
+redis-cli -p 6379 SET architecture "Lock-Free Actor Model"
+> OK
 
-## Supported Commands
-
-The server parses and communicates using the REdis Serialization Protocol (RESP). The following commands are fully supported:
-
-### Key-Value Operations
-- `SET key value [EX seconds]`: Set the string value of a key, optionally with a time-to-live expiration.
-- `GET key`: Get the value of a key.
-- `DEL key`: Delete a key.
-
-### Stream Operations
-- `XADD stream_name event_data`: Append a new event message to a stream.
-- `XREAD stream_name offset_id`: Read messages from a stream starting after the specified offset ID.
-
-### Server Operations
-- `BGREWRITEAOF`: Trigger a background process to rewrite and compress the Append-Only File.
-- `PING`: Test server connectivity and latency.
-- `SYNC`: Internal command used by replicas to initiate data synchronization.
-- `PROMOTE`: Internal command used by Sentinel to elevate a replica to master status.
-
-## Development and Testing
-
-To run the test suite and ensure all components are functioning correctly:
-
-```bash
-make test
+# Read the synchronized data from the Replica Node
+redis-cli -p 6380 GET architecture
+> "Lock-Free Actor Model"
 ```
 
-To format the codebase according to Go standards:
+---
 
-```bash
-make fmt
-```
+## Codebase Structure
 
-## Contributing
+The codebase is strictly modular, separated by architectural responsibilities:
 
-Contributions are welcome and appreciated. Please review the `CONTRIBUTING.md` file for detailed instructions on how to submit pull requests, report bugs, or request features. Ensure that all new code adheres to the existing architecture patterns and includes appropriate test coverage.
+- `cmd/`
+  - `redis-server/main.go`: Bootstraps the Master Node, initializing the DB, AOF, Broker, and Network Acceptor.
+  - `replica/main.go`: Bootstraps a Replica Node, handling the `SYNC` protocol and processing the Master's mutation stream.
+- `internal/`
+  - `server/tcp.go`: Layer 1 TCP Acceptor and Goroutine manager.
+  - `server/engine.go`: Layer 2 Lock-Free Actor Model and command router.
+  - `resp/parser.go`: The zero-copy wire protocol deserializer.
+  - `storage/database.go`: Layer 3 Memory Subsystem (LRU, TTL, Map management).
+  - `storage/aof.go`: Layer 4 Background Persistence and Group Commit worker.
+  - `storage/rewrite.go`: Layer 4 Point-in-Time Snapshotting and AOF Compaction.
+  - `replication/broker.go`: Layer 5 Asynchronous Fan-out Broadcaster for connected Replicas.
 
-Please note that this project is released with a Contributor Code of Conduct (`CODE_OF_CONDUCT.md`). By participating in this project you agree to abide by its terms.
+---
 
-## License
+## Performance Characteristics
 
-This project is licensed under the MIT License. See the `LICENSE` file for full details.
-
+Because this system is built entirely lock-free on the execution side:
+1. **Zero Context Switching**: The single Engine thread never yields to OS-level locks.
+2. **Cache Locality**: Memory reads and writes stay highly localized in the CPU cache.
+3. **Garbage Collection Immunity**: By recycling byte slices in the TCP layer and utilizing pointer-based memory management in the storage layer, Go's GC pressure is kept to an absolute minimum, ensuring sub-millisecond tail latencies even under maximum load.

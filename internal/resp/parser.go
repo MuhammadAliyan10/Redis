@@ -1,108 +1,66 @@
-// redis/internal/resp/parser.go
 package resp
 
 import (
-	"bufio"
+	"bytes"
 	"errors"
-	"io"
 	"strconv"
 )
 
-type Value struct{
-	Type  string
-	Str   string
-	Num   int
-	Bulk  string
-	Array []Value
-}
 
-type Parser struct{
-	reader *bufio.Reader
-}
-
-func NewParser(r io.Reader) *Parser{
-	return &Parser{reader:bufio.NewReader(r)}
-}
+var (
+	ErrIncomplete = errors.New("incomplete resp data")
+	ErrInvalid = errors.New("invalid resp format")
+)
 
 
-
-func (p *Parser) Read() (Value, error){
-_type, err := p.reader.ReadByte()
-if err != nil{
-	return Value{}, err
-}
-switch _type {
-case '*':
-	return p.readArray()
-
-case '$':
-	return p.readBulkString()
-
-default:
-	return Value{}, errors.New("unknown RESP type")
-}
-
-}
-
-func (p *Parser) readLine() (line []byte, err error){
-	for {
-		b, err := p.reader.ReadByte()
-		if err != nil{
-			return nil, err
+func Parse(buf []byte) ([][]byte, int, error){
+	if len(buf) == 0{
+		return nil, 0, ErrIncomplete
 	}
-	line = append(line, b)
-	if len(line) >=2 && line[len(line)-2] == '\r'{
-		break
-	}
-}
-
-return line[:len(line)-2], nil
-}
-
-func (p *Parser) readArray()(Value, error){
-	line, err:= p.readLine()
-	if err != nil {
-		return Value{},err
+	if buf[0] != '*' {
+		return nil,0, ErrInvalid
 	}
 
-	count, _ := strconv.Atoi(string(line))
-
-	val := Value{
-		Type: "array",
-		Array: make([]Value, count),
-
+	crlf := bytes.Index(buf, []byte("\r\n"))
+	if crlf == -1{
+		return nil, 0, ErrIncomplete
 	}
+	numElements, err := strconv.Atoi(string(buf[1:crlf]))
 
-	for i:=0; i<count; i++{
-		val.Array[i], err = p.Read()
-		if err != nil {
-			return Value{}, err
+	if err != nil || numElements < 0{
+		return nil, 0, ErrInvalid
+	}
+	offset := crlf + 2
+	args := make([][]byte, 0, numElements)
+
+	for i:=0; i< numElements; i++{
+		if offset >= len(buf){
+			return nil, 0, ErrIncomplete
 		}
+
+		if buf[offset] != '$'{
+			return nil, 0, ErrInvalid
+		}
+		crlf = bytes.Index(buf[offset:], []byte("\r\n"))
+		if crlf == -1 {
+			return nil, 0, ErrIncomplete
+		}
+		crlf += offset
+		strLen, err := strconv.Atoi(string(buf[offset+1 : crlf]))
+		if err != nil || strLen < 0 {
+			return nil, 0, ErrInvalid
+		}
+		startStr := crlf + 2
+		endStr := startStr + strLen
+		if endStr+2 > len(buf) {
+			return nil, 0, ErrIncomplete
+		}
+		if buf[endStr] != '\r' || buf[endStr+1] != '\n' {
+			return nil, 0, ErrInvalid
+		}
+		args = append(args, buf[startStr:endStr])
+		offset = endStr + 2
 	}
+return args, offset, nil
 
-	return val, nil
-
-
-
-}
-
-func (p *Parser) readBulkString()(Value, error){
-line, err:= p.readLine()
-if err != nil {
-		return Value{}, err
-	}
-
-	length, _ := strconv.Atoi(string(line))
-
-	bulk := make([]byte, length)
-_, err = io.ReadFull(p.reader, bulk)
-if err != nil{
-	return Value{}, err
-}
-	p.readLine()
-
-		return Value{
-		Type: "bulk",
-		Bulk: string(bulk),
-	}, nil
 }
